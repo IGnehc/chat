@@ -1,13 +1,15 @@
-# CodeRoom V2.4
+# CodeRoom V2.7 — Grayscale Terminal Chat
 
-- チャット欄の初期高さを約12%に縮小しました（スマホ約18%）。
-- チャット欄の上にある細いバーをドラッグして高さを変更できます（最小86px、最大65%）。
-- バーをダブルクリックすると初期高さに戻ります。キーボードの上下矢印でも調整できます。
-- 高さはブラウザ内に保存されます。
-- Alt+Q でコードモードのON/OFFを切り替えます。以前の Ctrl+Shift+H も残していますが、ブラウザによっては履歴画面のショートカットと競合します。
+This release changes only the chat presentation from V2.6.
 
-## 更新
-GitHubの `index.html` を置き換え、Commit後にGitHub Pagesで強制再読み込みしてください。Firebaseのルール変更は今回の画面調整には不要です。
+- All messages use neutral gray text and separators, without colored bubbles.
+- Your messages indent by 12px; other messages remain left-aligned.
+- Consecutive messages from the same sender hide repeated username and timestamp.
+- Keeps Escape to hide chat, Alt+Q to restore, editable scratchpad, and adjustable panel height.
+- No Firebase schema or rules changes required.
 
-## 注意
-コードモードは画面表示の切替であり、端末管理やネットワーク監視から通信を隠すものではありません。Firebaseのアクセス制御は別途適切に設定してください。
+## Deploy
+Replace `index.html` in the GitHub Pages repository, commit, wait for deployment, then hard-refresh.
+
+## Privacy
+The code-mode display is a visual privacy feature, not a substitute for Firestore access controls. Keep appropriate Firebase security rules; do not use broad anonymous-user access rules for sensitive chats.
