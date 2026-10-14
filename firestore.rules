@@ -1,33 +1,28 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function validRoomId(roomId) { return roomId.matches('r[0-9a-f]{64}'); }
     match /rooms/{roomId} {
-      function signedIn() { return request.auth != null; }
-      function member() { return signedIn() && request.auth.uid in resource.data.memberIds; }
-      allow create: if signedIn()
-        && request.resource.data.keys().hasOnly(['proof','memberIds','createdAt'])
-        && request.resource.data.proof is string
-        && request.resource.data.proof.size() == 64
-        && request.resource.data.memberIds == [request.auth.uid];
-      // Joining requires a transaction that reads the room; the room metadata is
-      // readable by signed-in users, but messages are restricted to members.
-      allow get: if signedIn();
-      allow list: if false;
-      allow update: if signedIn()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberIds'])
-        && resource.data.memberIds is list
-        && resource.data.memberIds.size() == 1
-        && request.resource.data.memberIds == [resource.data.memberIds[0],request.auth.uid]
-        && request.auth.uid != resource.data.memberIds[0];
-      allow delete: if false;
+      allow list, update, delete: if false;
+      allow get: if signedIn() && validRoomId(roomId);
+      allow create: if signedIn() && validRoomId(roomId)
+        && request.resource.data.keys().hasOnly(['createdAt'])
+        && request.resource.data.keys().hasAll(['createdAt'])
+        && request.resource.data.createdAt == request.time;
       match /messages/{messageId} {
-        allow read: if signedIn() && request.auth.uid in get(/databases/$(database)/documents/rooms/$(roomId)).data.memberIds;
-        allow create: if signedIn()
-          && request.auth.uid in get(/databases/$(database)/documents/rooms/$(roomId)).data.memberIds
-          && request.resource.data.keys().hasOnly(['senderId','name','text','createdAt'])
+        allow get, list: if signedIn() && validRoomId(roomId);
+        allow create: if signedIn() && validRoomId(roomId)
+          && exists(/databases/$(database)/documents/rooms/$(roomId))
+          && request.resource.data.keys().hasOnly(['senderId','iv','cipher','createdAt'])
+          && request.resource.data.keys().hasAll(['senderId','iv','cipher','createdAt'])
           && request.resource.data.senderId == request.auth.uid
-          && request.resource.data.name is string && request.resource.data.name.size() <= 24
-          && request.resource.data.text is string && request.resource.data.text.size() > 0 && request.resource.data.text.size() <= 2000
+          && request.resource.data.iv is string
+          && request.resource.data.iv.matches('[0-9a-f]{24}')
+          && request.resource.data.cipher is string
+          && request.resource.data.cipher.size() >= 32
+          && request.resource.data.cipher.size() <= 10000
+          && request.resource.data.cipher.matches('[0-9a-f]+')
           && request.resource.data.createdAt == request.time;
         allow update, delete: if false;
       }
