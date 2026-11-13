@@ -43,6 +43,14 @@ aside h3{font-size:11px;color:#aaa}
 .compose textarea{flex:1;min-width:0;height:35px;resize:none}
 .compose button{min-width:54px}
 .compose .attach{min-width:38px;background:#444}
+.voice-button{min-width:42px!important;touch-action:none;user-select:none;-webkit-user-select:none;white-space:nowrap}
+.voice-button.recording{background:#555;outline:1px solid #aaa}
+.voice-button.canceling{background:#754747}
+.voice-hint{position:fixed;bottom:72px;left:50%;transform:translateX(-50%);z-index:85;background:#303030;border:1px solid #666;color:#ddd;padding:12px 18px;border-radius:6px;font-size:13px;pointer-events:none;text-align:center;min-width:210px}
+.voice-message{display:inline-flex;align-items:center;gap:12px;background:#303030;border:1px solid #555;color:#ddd;padding:8px 12px;border-radius:4px;cursor:pointer;font:inherit;min-width:110px;max-width:100%}
+.voice-message:hover{background:#404040}
+.voice-duration{color:#aaa;font-size:12px}
+.voice-message audio{display:none}
 .status{height:24px;background:#007acc;display:flex;justify-content:space-between;align-items:center;padding:0 12px;font-size:11px}
 .modal{position:fixed;inset:0;background:#000b;display:grid;place-items:center;padding:15px}
 .modalbox{width:min(450px,100%);background:#252526;border:1px solid #555;border-radius:6px;padding:24px}
@@ -102,6 +110,7 @@ aside h3{font-size:11px;color:#aaa}
 <div class="compose">
 <input type="file" id="imageFile" accept="image/*" class="hidden">
 <button class="attach" id="attach" title="发送图片">▧</button>
+<button class="attach voice-button" id="voiceButton" type="button" title="按住说话，上滑取消" aria-label="按住录制语音">🎙</button>
 <textarea id="message" maxlength="2000" placeholder="Type a message... (Enter to send)"></textarea>
 <button id="send">Send</button>
 </div>
@@ -110,7 +119,11 @@ aside h3{font-size:11px;color:#aaa}
 </div>
 <div class="status">
 <span id="status">● Not connected</span>
-<span>CodeRoom V3.2 Spark</span>
+<span>CodeRoom V3.4 Spark</span>
+</div>
+<div id="voiceHint" class="voice-hint hidden">
+<span id="voiceHintText">🎙 正在录音 · 松开发送 · 上滑取消</span>
+<div id="voiceTimer">0:00</div>
 </div>
 <div id="viewer" class="viewer hidden" role="dialog" aria-modal="true">
 <button id="closeViewer">Close ×</button>
@@ -119,7 +132,7 @@ aside h3{font-size:11px;color:#aaa}
 <div id="login" class="modal">
 <div class="modalbox">
 <h2>CodeRoom</h2>
-<p class="help">明文聊天 · 最近200条 · Firestore压缩图片</p>
+<p class="help">明文聊天 · 最近200条 · Firestore压缩图片和语音</p>
 <label>显示名称</label>
 <input id="nickname" maxlength="24" placeholder="User A">
 <label>聊天室 ID</label>
@@ -154,6 +167,7 @@ const encoder=new TextEncoder();
 let db,auth,uid,roomId,roomKey;
 let joined=false,unsubscribe=null,codeMode=false;
 let sending=false,viewVersion=0;
+let voiceSession=null;
 
 function setStatus(value){
 $("status").textContent=value;
@@ -266,6 +280,57 @@ const body=document.createElement("div");
 body.className="msg-body";
 
 if(
+m.kind==="audio" &&
+typeof m.audioData==="string" &&
+m.audioData.length<=160000 &&
+/^data:audio\/(webm|mp4|ogg);base64,[A-Za-z0-9+/=]+$/.test(m.audioData)
+){
+const audio=document.createElement("audio");
+audio.src=m.audioData;
+audio.preload="none";
+
+const btn=document.createElement("button");
+btn.type="button";
+btn.className="voice-message";
+
+const symbol=document.createElement("span");
+symbol.textContent="▶";
+
+const duration=document.createElement("span");
+duration.className="voice-duration";
+duration.textContent=Math.round(Number(m.duration)||0)+" 秒";
+
+btn.append(symbol,duration);
+
+btn.addEventListener("click",async()=>{
+try{
+if(audio.paused){
+document.querySelectorAll(".voice-message audio").forEach(a=>{
+if(a!==audio)a.pause();
+});
+await audio.play();
+}else{
+audio.pause();
+}
+}catch(e){
+alert("播放失败："+e.message);
+}
+});
+
+audio.addEventListener("play",()=>{
+symbol.textContent="Ⅱ";
+});
+audio.addEventListener("pause",()=>{
+symbol.textContent="▶";
+});
+audio.addEventListener("ended",()=>{
+symbol.textContent="▶";
+});
+
+btn.append(audio);
+body.append(btn);
+
+}else if(
 m.kind==="image" &&
 typeof m.imageData==="string" &&
 m.imageData.length<400000 &&
@@ -490,6 +555,8 @@ if(file)sendImage(file);
 
 // 代码模式与快捷键
 function toggleCode(force){
+if(voiceSession&&!voiceSession.finished)finishVoice(true);
+
 codeMode=typeof force==="boolean"?force:!codeMode;
 document.body.classList.toggle("code-mode",codeMode);
 $("toggle").textContent=codeMode
@@ -586,9 +653,316 @@ panel.style.height="";
 document.documentElement.style.removeProperty("--chat-height");
 });
 
+// ===== CodeRoom V3.4 微信式按住录音 =====
+const voiceButton=$("voiceButton");
+const voiceHint=$("voiceHint");
+const voiceHintText=$("voiceHintText");
+const voiceTimer=$("voiceTimer");
+
+const MAX_VOICE_MS=15000;
+const MAX_AUDIO_CHARS=160000;
+
+function voiceUIReset(){
+voiceButton.classList.remove("recording","canceling");
+voiceHint.classList.add("hidden");
+voiceHintText.textContent="🎙 正在录音 · 松开发送 · 上滑取消";
+voiceTimer.textContent="0:00";
+}
+
+function releaseMic(s){
+s.stream?.getTracks().forEach(t=>t.stop());
+}
+
+function preferredMime(){
+if(typeof MediaRecorder==="undefined"){
+throw Error("浏览器不支持 MediaRecorder");
+}
+return [
+"audio/webm;codecs=opus",
+"audio/mp4",
+"audio/webm",
+"audio/ogg;codecs=opus",
+"audio/ogg"
+].find(t=>MediaRecorder.isTypeSupported(t))||"";
+}
+
+function blobDataURL(blob){
+return new Promise((resolve,reject)=>{
+const r=new FileReader();
+r.onload=()=>resolve(r.result);
+r.onerror=()=>reject(Error("读取录音失败"));
+r.readAsDataURL(blob);
+});
+}
+
+function finishVoice(cancel=false,s=voiceSession){
+if(!s||s.finished)return;
+
+s.finished=true;
+s.canceled ||= cancel;
+clearInterval(s.timer);
+voiceUIReset();
+
+// 麦克风授权尚未完成时，稍后自动释放
+if(!s.recorder)return;
+
+if(s.recorder.state!=="inactive"){
+try{
+s.recorder.stop();
+}catch(e){
+console.error(e);
+releaseMic(s);
+if(voiceSession===s)voiceSession=null;
+}
+}
+}
+
+async function startVoice(pointerId,y){
+if(!joined||!roomKey||sending||voiceSession||codeMode)return;
+
+const s={
+pointerId,
+startY:y,
+room:roomKey,
+sender:uid,
+finished:false,
+canceled:false,
+stream:null,
+recorder:null,
+chunks:[],
+timer:null,
+startedAt:0
+};
+
+voiceSession=s;
+voiceButton.classList.add("recording");
+voiceHint.classList.remove("hidden");
+voiceHintText.textContent="正在请求麦克风权限...";
+
+try{
+if(!navigator.mediaDevices?.getUserMedia){
+throw Error("浏览器不支持麦克风录音");
+}
+
+const mime=preferredMime();
+
+const stream=await navigator.mediaDevices.getUserMedia({
+audio:{
+echoCancellation:true,
+noiseSuppression:true,
+autoGainControl:true
+}
+});
+
+s.stream=stream;
+
+if(s.finished||s.canceled||voiceSession!==s){
+releaseMic(s);
+if(voiceSession===s)voiceSession=null;
+voiceUIReset();
+return;
+}
+
+const opts={audioBitsPerSecond:24000};
+if(mime)opts.mimeType=mime;
+
+const recorder=new MediaRecorder(stream,opts);
+s.recorder=recorder;
+
+recorder.ondataavailable=e=>{
+if(e.data?.size)s.chunks.push(e.data);
+};
+
+recorder.onerror=e=>{
+console.error("录音器错误",e);
+s.canceled=true;
+finishVoice(true,s);
+};
+
+recorder.onstop=async()=>{
+clearInterval(s.timer);
+releaseMic(s);
+voiceUIReset();
+
+if(voiceSession===s)voiceSession=null;
+
+if(s.canceled||!joined||roomKey!==s.room)return;
+
+const seconds=Math.min(
+15,(performance.now()-s.startedAt)/1000
+);
+
+if(seconds<0.4){
+setStatus("● 录音太短，已取消");
+return;
+}
+
+const audioMime=(recorder.mimeType||mime)
+.split(";")[0].toLowerCase();
+
+if(!["audio/webm","audio/mp4","audio/ogg"].includes(audioMime)){
+alert("当前浏览器录制的音频格式不支持发送");
+return;
+}
+
+const blob=new Blob(s.chunks,{type:audioMime});
+
+if(!blob.size){
+alert("没有录制到声音");
+return;
+}
+
+if(sending){
+alert("上一条消息还在发送，请重试");
+return;
+}
+
+sending=true;
+$("send").disabled=true;
+$("attach").disabled=true;
+voiceButton.disabled=true;
+setStatus("● Sending voice...");
+
+try{
+const audioData=await blobDataURL(blob);
+
+if(audioData.length>MAX_AUDIO_CHARS){
+throw Error("语音文件过大，请缩短录音");
+}
+
+if(!joined||roomKey!==s.room){
+throw Error("聊天室已切换，取消发送");
+}
+
+await addDoc(
+collection(db,"rooms",s.room,"messages"),
+{
+kind:"audio",
+text:"[audio]",
+audioData,
+audioMime,
+duration:Number(seconds.toFixed(2)),
+senderId:s.sender,
+createdAt:serverTimestamp(),
+expiresAt:Timestamp.fromMillis(Date.now()+3*86400000)
+}
+);
+
+setStatus("● Connected · plaintext");
+
+}catch(e){
+console.error("Voice send failed:",e);
+setStatus("● Voice send failed");
+alert("语音发送失败："+e.message);
+}finally{
+sending=false;
+$("send").disabled=false;
+$("attach").disabled=false;
+voiceButton.disabled=false;
+}
+};
+
+s.startedAt=performance.now();
+recorder.start(250);
+
+voiceHintText.textContent=
+"🎙 正在录音 · 松开发送 · 上滑取消";
+
+s.timer=setInterval(()=>{
+if(s.finished)return;
+
+const elapsed=performance.now()-s.startedAt;
+
+voiceTimer.textContent=
+"0:"+String(
+Math.min(15,Math.floor(elapsed/1000))
+).padStart(2,"0");
+
+if(elapsed>=MAX_VOICE_MS){
+finishVoice(false,s);
+}
+},120);
+
+}catch(e){
+console.error("Microphone:",e);
+s.canceled=true;
+s.finished=true;
+releaseMic(s);
+
+if(voiceSession===s)voiceSession=null;
+
+voiceUIReset();
+alert("无法录音："+e.message);
+}
+}
+
+voiceButton.addEventListener("pointerdown",e=>{
+if(e.button!==0||voiceSession||sending)return;
+
+e.preventDefault();
+
+try{
+voiceButton.setPointerCapture(e.pointerId);
+}catch(_){}
+
+startVoice(e.pointerId,e.clientY);
+});
+
+voiceButton.addEventListener("pointermove",e=>{
+const s=voiceSession;
+
+if(!s||s.finished||s.pointerId!==e.pointerId)return;
+
+s.canceled=e.clientY<s.startY-80;
+
+voiceButton.classList.toggle("canceling",s.canceled);
+
+voiceHintText.textContent=s.canceled
+?"松开取消录音"
+:"🎙 正在录音 · 松开发送 · 上滑取消";
+});
+
+voiceButton.addEventListener("pointerup",e=>{
+const s=voiceSession;
+if(s&&s.pointerId===e.pointerId){
+finishVoice(s.canceled,s);
+}
+});
+
+voiceButton.addEventListener("pointercancel",e=>{
+const s=voiceSession;
+if(s&&s.pointerId===e.pointerId){
+finishVoice(true,s);
+}
+});
+
+voiceButton.addEventListener("lostpointercapture",()=>{
+const s=voiceSession;
+if(s&&!s.finished){
+finishVoice(true,s);
+}
+});
+
+window.addEventListener("blur",()=>{
+if(voiceSession&&!voiceSession.finished){
+finishVoice(true);
+}
+});
+
+document.addEventListener("visibilitychange",()=>{
+if(document.hidden&&voiceSession&&!voiceSession.finished){
+finishVoice(true);
+}
+});
+
 // 发送与离开
 $("message").addEventListener("keydown",e=>{
-if(e.key==="Enter"&&!e.shiftKey&&!e.isComposing&&e.keyCode!==229){
+if(
+e.key==="Enter" &&
+!e.shiftKey &&
+!e.isComposing &&
+e.keyCode!==229
+){
 e.preventDefault();
 send();
 }
@@ -598,12 +972,17 @@ $("send").onclick=send;
 $("join").onclick=join;
 
 $("leave").onclick=()=>{
+if(voiceSession&&!voiceSession.finished){
+finishVoice(true);
+}
+
 unsubscribe?.();
 unsubscribe=null;
 joined=false;
 roomKey=null;
 viewVersion++;
 codeMode=false;
+
 document.body.classList.remove("code-mode");
 $("login").classList.remove("hidden");
 $("messages").replaceChildren();
@@ -613,10 +992,13 @@ setStatus("● Not connected");
 
 $("copyRoom").onclick=async()=>{
 if(!joined)return;
+
 try{
 await navigator.clipboard.writeText(roomId);
 $("copyRoom").textContent="Copied";
-setTimeout(()=>$("copyRoom").textContent="Copy room",1200);
+setTimeout(()=>{
+$("copyRoom").textContent="Copy room";
+},1200);
 }catch(e){
 alert("聊天室ID："+roomId);
 }
